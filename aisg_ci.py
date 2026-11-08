@@ -141,6 +141,8 @@ def safe_extract(zpath: Path, dest: Path, rel: dict) -> dict:
         for n in z.namelist():
             if n.endswith("/") or n.startswith("python/"):
                 continue  # Windows embedded runtime is not used on Linux runners
+            if os.name != "nt" and n.startswith("tools/") and n.lower().endswith(".exe"):
+                continue  # Windows scanner binaries; the Linux ones are installed below
             target = (dest / n).resolve()
             if root not in target.parents:
                 raise ActionError(f"unsafe path in package: {n}")
@@ -240,6 +242,25 @@ def write_output(name: str, value: str) -> None:
             fh.write(f"{name}={value}\n")
 
 
+SECRET_HELP = ("Set the AISG_WORKER secret to '<worker_id>:<secret>' — the values after --id and "
+               "--secret in the command shown by AISG dashboard > Worker > Connect manually "
+               "(pasting that whole command also works).")
+
+
+def parse_worker_secret(raw: str) -> tuple[str, str]:
+    """'<id>:<secret>', with spaces, or the whole 'python -m worker enroll --id … --secret …' command."""
+    raw = (raw or "").strip()
+    m_id = re.search(r"--id[=\s]+(\S+)", raw)
+    m_sec = re.search(r"--secret[=\s]+(\S+)", raw)
+    if m_id and m_sec:
+        return m_id.group(1).strip("'\""), m_sec.group(1).strip("'\"")
+    wid, _, secret = raw.partition(":")
+    wid, secret = wid.strip().strip("'\""), secret.strip().strip("'\"")
+    if not wid or not secret or " " in wid or " " in secret:
+        raise ActionError("AISG_WORKER is not in the expected format. " + SECRET_HELP)
+    return wid, secret
+
+
 # -------------------------------------------------------------------- main
 def main() -> int:
     raw = os.environ.get("AISG_WORKER", "").strip()
@@ -249,9 +270,7 @@ def main() -> int:
             return 0
         raise ActionError("AISG_WORKER secret is empty — create a worker in the AISG dashboard "
                           "(Worker > Connect manually) and store '<worker_id>:<secret>'")
-    wid, _, secret = raw.partition(":")
-    if not wid or not secret:
-        raise ActionError("AISG_WORKER must be '<worker_id>:<secret>'")
+    wid, secret = parse_worker_secret(raw)
     cfg = {"api": os.environ.get("AISG_API", "https://aisg.web.id").rstrip("/"),
            "wid": wid, "secret": secret}
     work = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "aisg"
@@ -261,7 +280,14 @@ def main() -> int:
     pkg.mkdir(parents=True)
 
     log("fetching the signed AISG worker package")
-    info = api(cfg, "/api/v1/worker/update/release", {"ci": True})
+    try:
+        info = api(cfg, "/api/v1/worker/update/release", {"ci": True})
+    except ActionError as exc:
+        if "HTTP 403" in str(exc):
+            raise ActionError("AISG rejected the worker credential (revoked, mistyped, or the id and "
+                              "secret come from two different 'Connect manually' clicks). "
+                              + SECRET_HELP) from exc
+        raise
     rel = verify_release(info.get("release") or "", info.get("sig") or "")
     zpath = work / "package.zip"
     zpath.write_bytes(http(cfg["api"] + info["download"], timeout=600))
@@ -275,7 +301,12 @@ def main() -> int:
         if man.get("pip"):
             subprocess.run(pip + list(man["pip"]), check=False)
         for name in list(man.get("tools_bin") or []) + list(man.get("download") or []):
-            install_tool(name, bin_dir, cache / "dl")
+            if install_tool(name, bin_dir, cache / "dl"):
+                # the worker looks for scanners in <package>/tools first
+                binary = TOOLS[name][0]
+                (pkg / "tools").mkdir(exist_ok=True)
+                shutil.copyfile(bin_dir / binary, pkg / "tools" / binary)
+                (pkg / "tools" / binary).chmod(0o755)
     env = dict(os.environ, AISG_AUTO_UPDATE="0", PYTHONUTF8="1",
                GRYPE_DB_CACHE_DIR=str(cache / "grype-db"),
                PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
