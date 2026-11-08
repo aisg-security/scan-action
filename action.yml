@@ -1,0 +1,65 @@
+name: AISG Security Scan
+description: Scan your repository with AISG on every pull request and get a "What to do now" comment. Your code stays in your CI.
+author: AISG
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  aisg-worker:
+    description: AISG worker credential as '<worker_id>:<secret>' (store it as a repository secret).
+    required: true
+  fail-on:
+    description: Fail the check when findings at or above this severity exist (none, critical, high, medium, low).
+    required: false
+    default: none
+  comment:
+    description: Post or update one AISG comment on the pull request.
+    required: false
+    default: "true"
+  github-token:
+    description: Token used to comment on the pull request.
+    required: false
+    default: ${{ github.token }}
+  api-url:
+    description: AISG API URL.
+    required: false
+    default: https://aisg.web.id
+
+outputs:
+  risk-level:
+    description: CRITICAL, HIGH, ELEVATED, LOW or NONE.
+    value: ${{ steps.scan.outputs.risk-level }}
+  findings:
+    description: Number of security findings.
+    value: ${{ steps.scan.outputs.findings }}
+  report:
+    description: Path of the PDF report on the runner.
+    value: ${{ steps.scan.outputs.report }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+    - uses: actions/cache@v4
+      with:
+        path: ~/.cache/aisg
+        key: aisg-${{ runner.os }}-v1-${{ github.run_id }}
+        restore-keys: aisg-${{ runner.os }}-v1-
+    - id: scan
+      shell: bash
+      env:
+        AISG_WORKER: ${{ inputs.aisg-worker }}
+        AISG_API: ${{ inputs.api-url }}
+        AISG_FAIL_ON: ${{ inputs.fail-on }}
+        AISG_COMMENT: ${{ inputs.comment }}
+        GITHUB_TOKEN_INPUT: ${{ inputs.github-token }}
+      run: python "${{ github.action_path }}/aisg_ci.py"
+    - if: always() && steps.scan.outputs.report != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: aisg-report
+        path: ${{ steps.scan.outputs.report }}
+        if-no-files-found: ignore
