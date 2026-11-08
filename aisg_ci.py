@@ -312,6 +312,12 @@ def main() -> int:
                PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     if (bin_dir / "grype").exists() and os.environ.get("AISG_TOOLS_PREINSTALLED") != "1":
         subprocess.run([str(bin_dir / "grype"), "db", "update"], env=env, check=False)
+        # the worker reads the database from <package>/tools/grype-db (as on the PC);
+        # keep the large database in the runner cache and point the package at it
+        link = pkg / "tools" / "grype-db"
+        if not link.exists() and (cache / "grype-db").is_dir():
+            (pkg / "tools").mkdir(exist_ok=True)
+            link.symlink_to(cache / "grype-db", target_is_directory=True)
 
     subprocess.run([sys.executable, "-m", "worker", "enroll", "--id", wid, "--secret", secret,
                     "--api", cfg["api"]], cwd=pkg, env=env, check=True,
